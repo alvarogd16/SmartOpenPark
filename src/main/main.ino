@@ -1,8 +1,12 @@
 /****************************
-    SmartOpenPark proyect
-*****************************/
-
-// Utils libraries
+ * SmartOpenPark 🐦
+ * (github.com/alvarogd16/SmartOpenPark)
+ * 
+ * Author: Álvaro García - @alvarogd16
+ * Mail: alvarogarcia16102000@gmail.com
+ * Licence: TODO
+ ****************************/
+ 
 #include <ESP8266WiFi.h>
 #include <ESP8266HTTPClient.h>
 #include <WiFiClient.h>
@@ -10,11 +14,20 @@
 #include <WiFiUdp.h>
 #include "DHT.h"
 
-// Need a config file to Wifi and API config
+/*
+ * You need a external config.h file with Wifi and API info.
+ * 
+ * This file is normally provided by me (Álvaro)
+ * If you need to modify or create a new one the fields needed are:
+ * - WIFI_SSID (your wifi name)
+ * - WIFI_PASSWORD (the password)
+ * - API_IP (by now we use the SmartPoliTech API)
+ * - API_KEY
+ * All the above are const char* to simplicity
+ */
 #include "./config.h"
 
-// API url
-String url = "http://__API_IP__/api/v1/output/json_write";
+String apiUrl = "http://__API_IP__/api/v1/output/json_write";
 String data = "json={\"info\": {\"device\": \"SMARTOPENPARK_PRUEBAS_1\", \"api_key\": \"__API_KEY__\"}, \"data\": \"{\\\"temperature\\\": __TEMP__, \\\"humidity\\\": __HUMIDITY__}\", \"time\": \"__TIME__\"}";
 
 // Get time from NTP (Network Time Protocol) server
@@ -26,8 +39,90 @@ NTPClient timeClient(ntpUDP, "europe.pool.ntp.org", utcOffsetInSeconds);
 // This is the temperature and humidity sensor
 #define DHTPIN 4
 #define DHTTYPE DHT22
-
 DHT dht(DHTPIN, DHTTYPE);
+
+struct sensorData_t {
+  float temperature;
+  float humidity;
+} sensorData;
+
+const int RETRY_TIME = 2000;
+const int DELAY_TIME = 10000;
+
+/*
+ * In this proyect we use a DHT22 sensor
+ */
+bool readSensor(sensorData_t &sensorData) {
+  // Read the data and check it
+  float t = dht.readTemperature();
+  float h = dht.readHumidity();
+  bool isDataOK = true;
+
+  if(isnan(t)) {
+    Serial.println(F("Error reading DHT22 temp. NaN values"));
+    t = 0.0;
+    isDataOK = false;
+  }
+  if(isnan(h)) {
+    Serial.println(F("Error reading DHT22 humidity. NaN values"));
+    h = 0;
+    isDataOK = false;
+  }
+
+  sensorData.temperature = t;
+  sensorData.humidity = h;
+  return isDataOK;
+}
+
+/*
+ * Add current time and sensor data to the json payload
+ */
+String parseData(String &jsonData, sensorData_t &sensorData) {
+  timeClient.update();
+  String currentTime = timeClient.getFormattedDate();
+  
+  String jsonPayload = String(jsonData);
+  jsonPayload.replace("__TEMP__", (String)sensorData.temperature);
+  jsonPayload.replace("__HUMIDITY__", (String)sensorData.humidity);
+  jsonPayload.replace("__TIME__", currentTime);
+  Serial.println(jsonPayload);
+
+  return jsonPayload;
+}
+
+/*
+ * Send the data to the DB using the API
+ * Make a POST HTTP request
+ */
+void sendDataRequest(String &dataToSend) {
+  if(WiFi.status() != WL_CONNECTED) return;
+
+  WiFiClient wifiClient;
+  HTTPClient http;
+  
+  http.begin(wifiClient, apiUrl);
+  http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+  int httpResponseCode = http.POST(dataToSend);
+
+  /*
+   * To know the error corresponding to tht number
+   * check the ESP8266HTTPClient documentation
+   */
+  if(httpResponseCode < 0) {
+    Serial.print("Error code: ");
+    Serial.println(httpResponseCode);
+    http.end();
+    return;
+  }
+
+  String payload = http.getString();
+  Serial.print("HTTP Response code: ");
+  Serial.println(httpResponseCode);
+  Serial.println(payload);
+
+  // Free resources
+  http.end();
+}
 
 void setup() {
   // TODO Made Serial optional with a define
@@ -45,7 +140,6 @@ void setup() {
     Serial.print('.');
   }
 
-
   Serial.print("\nConectado a:\t");
   Serial.println(WIFI_SSID);
   Serial.print("IP address:\t");
@@ -53,10 +147,10 @@ void setup() {
 
   timeClient.begin(123);
 
-  url.replace("__API_IP__", API_IP);
+  apiUrl.replace("__API_IP__", API_IP);
   data.replace("__API_KEY__", API_KEY);
 
-  Serial.println(url);
+  Serial.println(apiUrl);
 
   // Start DHT22 sensor
   dht.begin();
@@ -65,55 +159,16 @@ void setup() {
 }
 
 void loop () {
-    // Read the data and check it
-  float t = dht.readTemperature();
-  float h = dht.readHumidity();
-
-  if(isnan(t)) {
-    Serial.println(F("Error reading DHT22 temp. NaN values"));
-    t = 0.0;
+  bool isDataOK = readSensor(sensorData);
+  if(!isDataOK) {
+    Serial.print("Retry to get sensor data in ");
+    Serial.print(RETRY_TIME);
+    Serial.println(" milliseconds");
+    delay(RETRY_TIME);
+    return;
   }
-
-  if(isnan(h)) {
-    Serial.println(F("Error reading DHT22 humidity. NaN values"));
-    h = 0;
-  }
-
-  timeClient.update();
-  String currentTime = timeClient.getFormattedDate();
-
-
-  // Create the payload with the data
-  String fullData = String(data);
-  fullData.replace("__TEMP__", (String)t);
-  fullData.replace("__HUMIDITY__", (String)h);
-  fullData.replace("__TIME__", currentTime);
-  Serial.println(fullData);
-
-
-  // Send the data to the DB using the API
-  if(WiFi.status()== WL_CONNECTED){
-    WiFiClient client;
-    HTTPClient http;
-    
-    // Your Domain name with URL path or IP address with path
-    http.begin(client, url);
-    http.addHeader("Content-Type", "application/x-www-form-urlencoded");
-    int httpResponseCode = http.POST(fullData);
-      
-    if (httpResponseCode>0) {
-      Serial.print("HTTP Response code: ");
-      Serial.println(httpResponseCode);
-      String payload = http.getString();
-      Serial.println(payload);
-    }
-    else {
-      Serial.print("Error code: ");
-      Serial.println(httpResponseCode);
-    }
-    // Free resources
-    http.end();
-  }
-
-  delay(10000);
+  
+  String jsonPayload = parseData(data, sensorData);
+  sendDataRequest(jsonPayload);
+  delay(DELAY_TIME);
 }
